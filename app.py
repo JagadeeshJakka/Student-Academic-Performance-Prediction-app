@@ -25,7 +25,7 @@ def load_artifacts():
         "metadata": BASE_DIR / "metadata.pkl",
     }
 
-    missing = [name for name, path in files.items() if not path.exists()]
+    missing = [str(path.name) for path in files.values() if not path.exists()]
     if missing:
         raise FileNotFoundError(
             "Missing files: " + ", ".join(missing) +
@@ -50,6 +50,26 @@ def load_artifacts():
     return rf_model, lr_model, scaler, label_encoders, metadata
 
 
+@st.cache_data
+def load_dataset():
+    candidates = [
+        BASE_DIR / "student_performance_dataset.csv",
+        BASE_DIR / "dataset.csv",
+        BASE_DIR / "data.csv",
+        BASE_DIR / "students.csv",
+    ]
+
+    for path in candidates:
+        if path.exists():
+            try:
+                df = pd.read_csv(path)
+                return df, path.name
+            except Exception:
+                pass
+
+    return None, None
+
+
 def safe_feature_columns(metadata):
     if isinstance(metadata, dict) and "feature_columns" in metadata:
         cols = metadata["feature_columns"]
@@ -72,51 +92,70 @@ def encoder_classes_for_column(label_encoders, col_name):
     if isinstance(label_encoders, dict) and col_name in label_encoders:
         encoder = label_encoders[col_name]
         if hasattr(encoder, "classes_"):
-            return list(encoder.classes_)
+            return [str(x) for x in encoder.classes_]
     return None
 
 
-def build_input_form(feature_columns, label_encoders):
+def get_dataset_profile(df, feature_columns):
+    profile = {}
+
+    if df is None:
+        return profile
+
+    for col in feature_columns:
+        if col not in df.columns:
+            continue
+
+        series = df[col].dropna()
+        if series.empty:
+            continue
+
+        if pd.api.types.is_numeric_dtype(series):
+            profile[col] = {
+                "type": "numeric",
+                "min": float(series.min()),
+                "max": float(series.max()),
+                "mean": float(series.mean()),
+            }
+        else:
+            unique_values = [str(v) for v in series.astype(str).unique().tolist()]
+            profile[col] = {
+                "type": "categorical",
+                "values": unique_values,
+                "mode": str(series.astype(str).mode().iloc[0]) if not series.mode().empty else unique_values[0],
+            }
+
+    return profile
+
+
+def build_input_form(feature_columns, label_encoders, dataset_profile):
     st.subheader("Enter Student Details")
 
-    common_defaults = {
-        "age": 21,
-        "study_hours_per_day": 3.0,
-        "attendance_percent": 80.0,
-        "assignments_score": 70.0,
-        "previous_marks": 68.0,
-        "final_exam_score": 65.0,
-        "study_efficiency": 240.0,
-        "engagement_score": 75.0,
-        "performance_gap": 0.0,
-        "internet_access": "Yes",
-        "part_time_job": "No",
-        "extra_classes": "No",
-        "student_id": "S1001",
-    }
-
     user_values = {}
-
     cols = st.columns(2)
 
     for i, col_name in enumerate(feature_columns):
         with cols[i % 2]:
             lower = col_name.lower()
-            classes = encoder_classes_for_column(label_encoders, col_name)
+            profile = dataset_profile.get(col_name, {})
+            encoder_classes = encoder_classes_for_column(label_encoders, col_name)
 
-            if classes is not None and len(classes) > 0:
-                default_value = common_defaults.get(col_name, common_defaults.get(lower, classes[0]))
-                default_index = classes.index(default_value) if default_value in classes else 0
+            if encoder_classes:
+                default_value = encoder_classes[0]
+                if profile.get("type") == "categorical" and profile.get("mode") in encoder_classes:
+                    default_value = profile["mode"]
+
+                default_index = encoder_classes.index(default_value)
                 user_values[col_name] = st.selectbox(
                     col_name.replace("_", " ").title(),
-                    classes,
+                    encoder_classes,
                     index=default_index,
                 )
                 continue
 
-            if lower in {"internet_access", "part_time_job", "extra_classes"}:
-                options = ["Yes", "No"]
-                default_value = common_defaults.get(lower, "Yes")
+            if profile.get("type") == "categorical":
+                options = profile.get("values", ["Yes", "No"])
+                default_value = profile.get("mode", options[0])
                 default_index = options.index(default_value) if default_value in options else 0
                 user_values[col_name] = st.selectbox(
                     col_name.replace("_", " ").title(),
@@ -124,25 +163,35 @@ def build_input_form(feature_columns, label_encoders):
                     index=default_index,
                 )
             elif "student_id" in lower:
+                default_value = "S1001"
                 user_values[col_name] = st.text_input(
                     col_name.replace("_", " ").title(),
-                    value=str(common_defaults.get("student_id", "S1001")),
-                    help="Use the same format used in training. If your model was trained with encoded student IDs, unseen IDs may not work well.",
-                )
-            elif lower in {"age"}:
-                user_values[col_name] = st.number_input(
-                    col_name.replace("_", " ").title(),
-                    min_value=10,
-                    max_value=100,
-                    value=int(common_defaults.get(lower, 20)),
-                    step=1,
+                    value=default_value,
+                    help="Use the same format used in training.",
                 )
             else:
-                user_values[col_name] = st.number_input(
-                    col_name.replace("_", " ").title(),
-                    value=float(common_defaults.get(lower, 0.0)),
-                    step=0.1,
-                )
+                min_val = float(profile.get("min", 0.0))
+                max_val = float(profile.get("max", max(100.0, min_val + 10)))
+                mean_val = float(profile.get("mean", (min_val + max_val) / 2))
+
+                step = 1 if lower == "age" else 0.1
+
+                if lower == "age":
+                    user_values[col_name] = st.number_input(
+                        col_name.replace("_", " ").title(),
+                        min_value=int(min_val),
+                        max_value=int(max_val),
+                        value=int(round(mean_val)),
+                        step=1,
+                    )
+                else:
+                    user_values[col_name] = st.number_input(
+                        col_name.replace("_", " ").title(),
+                        min_value=min_val,
+                        max_value=max_val,
+                        value=mean_val,
+                        step=step,
+                    )
 
     return user_values
 
@@ -194,10 +243,11 @@ def encode_categorical_columns(input_df, label_encoders):
 
         if hasattr(encoder, "classes_") and df[col].dtype == "object":
             value = str(df[col].iloc[0])
-            if value not in encoder.classes_:
+            allowed = [str(x) for x in encoder.classes_]
+            if value not in allowed:
                 raise ValueError(
                     f"Value '{value}' for column '{col}' was not seen during training. "
-                    f"Allowed values: {list(encoder.classes_)}"
+                    f"Allowed values: {allowed}"
                 )
             df[col] = encoder.transform(df[col].astype(str))
 
@@ -236,7 +286,7 @@ def main():
     st.title("🎓 Student Academic Performance Prediction")
     st.write(
         "This app predicts whether a student is likely to **Pass** or **Fail** "
-        "based on the trained machine learning models."
+        "using your trained machine learning models."
     )
 
     try:
@@ -245,7 +295,10 @@ def main():
         st.error(str(e))
         st.stop()
 
+    dataset_df, dataset_name = load_dataset()
     feature_columns = safe_feature_columns(metadata)
+    dataset_profile = get_dataset_profile(dataset_df, feature_columns)
+
     target_column = metadata.get("target_column", "pass_fail") if isinstance(metadata, dict) else "pass_fail"
     target_encoder = label_encoders.get(target_column) if isinstance(label_encoders, dict) else None
 
@@ -258,19 +311,22 @@ def main():
         )
 
         st.markdown("### Files")
-        st.success("All .pkl files should be in the same folder as app.py")
+        st.success("Keep all .pkl files in the same folder as app.py")
 
-        if "student_id" in feature_columns or "final_exam_score" in feature_columns:
+        if dataset_df is not None:
+            st.success(f"Dataset loaded: {dataset_name}")
+            st.write(f"Rows: {dataset_df.shape[0]}")
+            st.write(f"Columns: {dataset_df.shape[1]}")
+        else:
             st.warning(
-                "Your saved model appears to use `student_id` or `final_exam_score`. "
-                "That can reduce real-world usefulness or cause leakage. "
-                "Retraining without those columns is recommended."
+                "Dataset file not found. Add one of these in the same folder: "
+                "`student_performance_dataset.csv`, `dataset.csv`, `data.csv`, or `students.csv`"
             )
 
         with st.expander("Show expected input columns"):
             st.write(feature_columns)
 
-    user_values = build_input_form(feature_columns, label_encoders)
+    user_values = build_input_form(feature_columns, label_encoders, dataset_profile)
 
     if st.button("Predict Result", use_container_width=True):
         try:
@@ -283,7 +339,6 @@ def main():
 
             input_df = input_df[feature_columns]
             input_df = encode_categorical_columns(input_df, label_encoders)
-
             X_scaled = scaler.transform(input_df)
 
             model = rf_model if model_choice == "Random Forest" else lr_model
@@ -306,10 +361,13 @@ def main():
         except Exception as e:
             st.error(f"Prediction failed: {e}")
 
+    if dataset_df is not None:
+        st.markdown("---")
+        st.subheader("Dataset Preview")
+        st.dataframe(dataset_df.head(), use_container_width=True)
+
     st.markdown("---")
-    st.caption(
-        "Built with Streamlit. Make sure your model artifacts were saved from the same training pipeline."
-    )
+    st.caption("Built with Streamlit. Input ranges and dropdowns are pulled from the dataset when available.")
 
 
 if __name__ == "__main__":
