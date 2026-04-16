@@ -6,7 +6,7 @@ import streamlit as st
 
 
 st.set_page_config(
-    page_title="Student Performance Prediction",
+    page_title="Student Academic Performance Prediction",
     page_icon="🎓",
     layout="wide",
 )
@@ -89,14 +89,6 @@ def safe_feature_columns(metadata):
     ]
 
 
-def encoder_classes_for_column(label_encoders, col_name):
-    if isinstance(label_encoders, dict) and col_name in label_encoders:
-        encoder = label_encoders[col_name]
-        if hasattr(encoder, "classes_"):
-            return [str(x) for x in encoder.classes_]
-    return None
-
-
 def get_dataset_profile(df, feature_columns):
     profile = {}
 
@@ -117,82 +109,163 @@ def get_dataset_profile(df, feature_columns):
                 "min": float(series.min()),
                 "max": float(series.max()),
                 "mean": float(series.mean()),
+                "median": float(series.median()),
             }
         else:
-            unique_values = [str(v) for v in series.astype(str).unique().tolist()]
-            mode_val = str(series.astype(str).mode().iloc[0]) if not series.mode().empty else unique_values[0]
+            values = [str(v) for v in series.astype(str).unique().tolist()]
+            mode_val = str(series.astype(str).mode().iloc[0]) if not series.mode().empty else values[0]
             profile[col] = {
                 "type": "categorical",
-                "values": unique_values,
+                "values": values,
                 "mode": mode_val,
             }
 
     return profile
 
 
-def build_input_form(feature_columns, label_encoders, dataset_profile):
-    st.subheader("Enter Student Details")
+def encoder_classes_for_column(label_encoders, col_name):
+    if isinstance(label_encoders, dict) and col_name in label_encoders:
+        encoder = label_encoders[col_name]
+        if hasattr(encoder, "classes_"):
+            return [str(x) for x in encoder.classes_]
+    return None
+
+
+def get_prefill_row(df):
+    if df is None or df.empty:
+        return {}
+
+    st.markdown("### Choose Student Record")
+    top_cols = st.columns([2, 2, 1])
+
+    selected_index = 0
+    with top_cols[0]:
+        if "student_id" in df.columns:
+            student_options = df["student_id"].astype(str).tolist()
+            selected_student_id = st.selectbox(
+                "Select Student ID from Dataset",
+                student_options,
+                index=0,
+                help="Pick an existing student to auto-fill the form."
+            )
+            matches = df.index[df["student_id"].astype(str) == selected_student_id].tolist()
+            if matches:
+                selected_index = matches[0]
+        else:
+            selected_index = 0
+
+    with top_cols[1]:
+        row_number = st.number_input(
+            "Or choose row number",
+            min_value=0,
+            max_value=max(len(df) - 1, 0),
+            value=int(selected_index),
+            step=1,
+            help="This will also auto-fill the form using the selected row."
+        )
+        selected_index = int(row_number)
+
+    with top_cols[2]:
+        use_defaults = st.toggle("Use dataset row", value=True)
+
+    if use_defaults:
+        return df.iloc[selected_index].to_dict()
+    return {}
+
+
+def build_input_form(feature_columns, label_encoders, dataset_profile, prefill_row):
+    st.markdown("### Student Input Form")
+    st.caption("The fields below are built from the uploaded CSV values.")
 
     user_values = {}
     cols = st.columns(2)
 
     for i, col_name in enumerate(feature_columns):
         with cols[i % 2]:
+            label = col_name.replace("_", " ").title()
             lower = col_name.lower()
             profile = dataset_profile.get(col_name, {})
             encoder_classes = encoder_classes_for_column(label_encoders, col_name)
+            prefill_value = prefill_row.get(col_name, None)
 
-            if encoder_classes:
-                default_value = encoder_classes[0]
-                if profile.get("type") == "categorical" and profile.get("mode") in encoder_classes:
-                    default_value = profile["mode"]
-
-                default_index = encoder_classes.index(default_value)
+            if "student_id" in lower:
+                options = profile.get("values", [])
+                if prefill_value is not None:
+                    prefill_value = str(prefill_value)
+                if not options and prefill_value is not None:
+                    options = [prefill_value]
+                default_index = options.index(prefill_value) if prefill_value in options else 0
                 user_values[col_name] = st.selectbox(
-                    col_name.replace("_", " ").title(),
-                    encoder_classes,
+                    label,
+                    options=options,
                     index=default_index,
+                    help="Student IDs are loaded from the dataset.",
+                    key=f"input_{col_name}",
                 )
                 continue
 
-            if "student_id" in lower:
-                default_value = profile.get("mode", "S1001")
+            if encoder_classes:
+                options = encoder_classes
+                if prefill_value is not None:
+                    prefill_value = str(prefill_value)
+                elif profile.get("mode") in options:
+                    prefill_value = profile.get("mode")
+                else:
+                    prefill_value = options[0]
+
+                default_index = options.index(prefill_value) if prefill_value in options else 0
                 user_values[col_name] = st.selectbox(
-                    col_name.replace("_", " ").title(),
-                    options=profile.get("values", [default_value]),
-                    index=profile.get("values", [default_value]).index(default_value)
-                    if default_value in profile.get("values", [default_value]) else 0,
-                    help="Loaded from the uploaded dataset values.",
-                )
-            elif profile.get("type") == "categorical":
-                options = profile.get("values", ["Yes", "No"])
-                default_value = profile.get("mode", options[0])
-                default_index = options.index(default_value) if default_value in options else 0
-                user_values[col_name] = st.selectbox(
-                    col_name.replace("_", " ").title(),
-                    options,
+                    label,
+                    options=options,
                     index=default_index,
+                    key=f"input_{col_name}",
+                )
+                continue
+
+            if profile.get("type") == "categorical":
+                options = profile.get("values", [])
+                if prefill_value is not None:
+                    prefill_value = str(prefill_value)
+                else:
+                    prefill_value = profile.get("mode", options[0] if options else "")
+                default_index = options.index(prefill_value) if prefill_value in options else 0
+                user_values[col_name] = st.selectbox(
+                    label,
+                    options=options,
+                    index=default_index,
+                    key=f"input_{col_name}",
                 )
             else:
                 min_val = float(profile.get("min", 0.0))
                 max_val = float(profile.get("max", max(100.0, min_val + 10)))
-                mean_val = float(profile.get("mean", (min_val + max_val) / 2))
+                default_val = float(prefill_value) if prefill_value is not None else float(profile.get("median", profile.get("mean", min_val)))
 
                 if lower == "age":
-                    user_values[col_name] = st.number_input(
-                        col_name.replace("_", " ").title(),
+                    user_values[col_name] = st.slider(
+                        label,
                         min_value=int(min_val),
                         max_value=int(max_val),
-                        value=int(round(mean_val)),
+                        value=int(round(default_val)),
                         step=1,
+                        key=f"input_{col_name}",
+                    )
+                elif lower in {"attendance_percent", "assignments_score", "previous_marks", "final_exam_score"}:
+                    user_values[col_name] = st.slider(
+                        label,
+                        min_value=int(min_val),
+                        max_value=int(max_val),
+                        value=int(round(default_val)),
+                        step=1,
+                        key=f"input_{col_name}",
                     )
                 else:
-                    user_values[col_name] = st.number_input(
-                        col_name.replace("_", " ").title(),
-                        min_value=min_val,
-                        max_value=max_val,
-                        value=mean_val,
+                    user_values[col_name] = st.slider(
+                        label,
+                        min_value=float(min_val),
+                        max_value=float(max_val),
+                        value=float(default_val),
                         step=0.1,
+                        key=f"input_{col_name}",
                     )
 
     return user_values
@@ -249,11 +322,33 @@ def model_probability(model, X_scaled):
     return None
 
 
+def pretty_metric_cards(df):
+    if df is None or df.empty:
+        return
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.metric("Records", f"{df.shape[0]}")
+    with c2:
+        st.metric("Features", f"{df.shape[1]}")
+    with c3:
+        if "pass_fail" in df.columns:
+            pass_rate = (df["pass_fail"].astype(str).str.lower() == "pass").mean() * 100
+            st.metric("Pass Rate", f"{pass_rate:.1f}%")
+        else:
+            st.metric("Pass Rate", "N/A")
+    with c4:
+        if "study_hours_per_day" in df.columns:
+            st.metric("Avg Study Hours", f"{df['study_hours_per_day'].mean():.1f}")
+        else:
+            st.metric("Avg Study Hours", "N/A")
+
+
 def main():
     st.title("🎓 Student Academic Performance Prediction")
     st.write(
-        "Upload a dataset or use the default CSV. "
-        "The form values update automatically from the dataset."
+        "Upload your CSV dataset and use a real student record to auto-fill the prediction form. "
+        "All dropdowns and input ranges are built from the CSV values."
     )
 
     try:
@@ -269,22 +364,18 @@ def main():
     default_df, default_name = load_default_dataset()
 
     with st.sidebar:
-        st.header("Model Settings")
+        st.header("Settings")
         model_choice = st.selectbox(
-            "Choose model",
+            "Choose Model",
             ["Random Forest", "Logistic Regression"],
             index=0,
         )
 
-        st.markdown("### Upload Dataset")
         uploaded_file = st.file_uploader(
-            "Upload CSV dataset",
+            "Upload CSV Dataset",
             type=["csv"],
-            help="When you upload a CSV, the form fields update from that dataset's values."
+            help="Upload a CSV to refresh all form values from that dataset."
         )
-
-    dataset_df = None
-    dataset_name = None
 
     if uploaded_file is not None:
         try:
@@ -297,30 +388,38 @@ def main():
         dataset_df = default_df
         dataset_name = default_name
 
+    if dataset_df is None:
+        st.warning("Please upload a CSV dataset or keep one beside app.py.")
+        st.stop()
+
     dataset_profile = get_dataset_profile(dataset_df, feature_columns)
 
     with st.sidebar:
-        st.markdown("### Dataset Status")
-        if dataset_df is not None:
-            st.success(f"Dataset loaded: {dataset_name}")
-            st.write(f"Rows: {dataset_df.shape[0]}")
-            st.write(f"Columns: {dataset_df.shape[1]}")
-        else:
-            st.warning("No dataset found. Upload a CSV or keep a CSV beside app.py.")
+        st.success(f"Dataset Loaded: {dataset_name}")
+        st.write(f"Rows: {dataset_df.shape[0]}")
+        st.write(f"Columns: {dataset_df.shape[1]}")
 
-        with st.expander("Expected model input columns"):
+        with st.expander("Model Input Columns"):
             st.write(feature_columns)
 
-    if dataset_df is not None:
-        missing_columns = [col for col in feature_columns if col not in dataset_df.columns]
-        extra_columns = [col for col in dataset_df.columns if col not in feature_columns and col != target_column]
+    st.markdown("## Dataset Overview")
+    pretty_metric_cards(dataset_df)
 
-        if missing_columns:
-            st.warning(f"Missing columns in dataset: {missing_columns}")
-        if extra_columns:
-            st.info(f"Extra dataset columns not used by model: {extra_columns}")
+    missing_columns = [col for col in feature_columns if col not in dataset_df.columns]
+    extra_columns = [col for col in dataset_df.columns if col not in feature_columns and col != target_column]
 
-    user_values = build_input_form(feature_columns, label_encoders, dataset_profile)
+    if missing_columns:
+        st.warning(f"Missing columns in dataset: {missing_columns}")
+    if extra_columns:
+        st.info(f"Extra dataset columns not used by the model: {extra_columns}")
+
+    prefill_row = get_prefill_row(dataset_df)
+
+    with st.expander("Preview Selected Dataset Rows", expanded=False):
+        preview_columns = [col for col in dataset_df.columns if col in feature_columns or col == target_column]
+        st.dataframe(dataset_df[preview_columns].head(10), use_container_width=True)
+
+    user_values = build_input_form(feature_columns, label_encoders, dataset_profile, prefill_row)
 
     if st.button("Predict Result", use_container_width=True):
         try:
@@ -339,30 +438,30 @@ def main():
             prediction_label = map_prediction_label(prediction, target_encoder=target_encoder)
             probability = model_probability(model, X_scaled)
 
-            st.subheader("Prediction Output")
-            if prediction_label.strip().lower() == "pass":
-                st.success(f"Predicted Result: {prediction_label}")
-            else:
-                st.error(f"Predicted Result: {prediction_label}")
+            st.markdown("## Prediction Output")
+            out1, out2 = st.columns([1, 1])
 
-            if probability is not None:
-                st.info(f"Probability of Pass: {probability:.2f}%")
+            with out1:
+                if prediction_label.strip().lower() == "pass":
+                    st.success(f"Predicted Result: {prediction_label}")
+                else:
+                    st.error(f"Predicted Result: {prediction_label}")
 
-            st.subheader("Processed Input Used by the Model")
+                if probability is not None:
+                    st.info(f"Probability of Pass: {probability:.2f}%")
+
+            with out2:
+                st.write("Selected Model")
+                st.code(model_choice)
+
+            st.markdown("### Processed Input Used by the Model")
             st.dataframe(input_df, use_container_width=True)
 
         except Exception as e:
             st.error(f"Prediction failed: {e}")
 
-    if dataset_df is not None:
-        st.markdown("---")
-        st.subheader("Dataset Preview")
-        st.dataframe(dataset_df.head(), use_container_width=True)
-
     st.markdown("---")
-    st.caption(
-        "Upload a new CSV anytime and the app form will refresh using that dataset's values."
-    )
+    st.caption("UI updated from the CSV dataset: dropdowns, ranges, defaults, and student record auto-fill.")
 
 
 if __name__ == "__main__":
