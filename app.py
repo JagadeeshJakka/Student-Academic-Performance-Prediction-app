@@ -1,7 +1,6 @@
 import pickle
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -51,7 +50,7 @@ def load_artifacts():
 
 
 @st.cache_data
-def load_dataset():
+def load_default_dataset():
     candidates = [
         BASE_DIR / "student_performance_dataset.csv",
         BASE_DIR / "dataset.csv",
@@ -77,6 +76,7 @@ def safe_feature_columns(metadata):
             return cols
 
     return [
+        "student_id",
         "age",
         "study_hours_per_day",
         "attendance_percent",
@@ -85,6 +85,7 @@ def safe_feature_columns(metadata):
         "internet_access",
         "part_time_job",
         "extra_classes",
+        "final_exam_score",
     ]
 
 
@@ -119,10 +120,11 @@ def get_dataset_profile(df, feature_columns):
             }
         else:
             unique_values = [str(v) for v in series.astype(str).unique().tolist()]
+            mode_val = str(series.astype(str).mode().iloc[0]) if not series.mode().empty else unique_values[0]
             profile[col] = {
                 "type": "categorical",
                 "values": unique_values,
-                "mode": str(series.astype(str).mode().iloc[0]) if not series.mode().empty else unique_values[0],
+                "mode": mode_val,
             }
 
     return profile
@@ -153,7 +155,16 @@ def build_input_form(feature_columns, label_encoders, dataset_profile):
                 )
                 continue
 
-            if profile.get("type") == "categorical":
+            if "student_id" in lower:
+                default_value = profile.get("mode", "S1001")
+                user_values[col_name] = st.selectbox(
+                    col_name.replace("_", " ").title(),
+                    options=profile.get("values", [default_value]),
+                    index=profile.get("values", [default_value]).index(default_value)
+                    if default_value in profile.get("values", [default_value]) else 0,
+                    help="Loaded from the uploaded dataset values.",
+                )
+            elif profile.get("type") == "categorical":
                 options = profile.get("values", ["Yes", "No"])
                 default_value = profile.get("mode", options[0])
                 default_index = options.index(default_value) if default_value in options else 0
@@ -162,19 +173,10 @@ def build_input_form(feature_columns, label_encoders, dataset_profile):
                     options,
                     index=default_index,
                 )
-            elif "student_id" in lower:
-                default_value = "S1001"
-                user_values[col_name] = st.text_input(
-                    col_name.replace("_", " ").title(),
-                    value=default_value,
-                    help="Use the same format used in training.",
-                )
             else:
                 min_val = float(profile.get("min", 0.0))
                 max_val = float(profile.get("max", max(100.0, min_val + 10)))
                 mean_val = float(profile.get("mean", (min_val + max_val) / 2))
-
-                step = 1 if lower == "age" else 0.1
 
                 if lower == "age":
                     user_values[col_name] = st.number_input(
@@ -190,45 +192,10 @@ def build_input_form(feature_columns, label_encoders, dataset_profile):
                         min_value=min_val,
                         max_value=max_val,
                         value=mean_val,
-                        step=step,
+                        step=0.1,
                     )
 
     return user_values
-
-
-def add_engineered_features_if_needed(input_data):
-    data = input_data.copy()
-
-    if (
-        "study_efficiency" in data.columns
-        and "study_hours_per_day" in data.columns
-        and "attendance_percent" in data.columns
-    ):
-        data["study_efficiency"] = data["study_hours_per_day"] * data["attendance_percent"]
-
-    if (
-        "engagement_score" in data.columns
-        and "attendance_percent" in data.columns
-        and "assignments_score" in data.columns
-        and "extra_classes" in data.columns
-    ):
-        extra_val = data["extra_classes"].iloc[0]
-        if isinstance(extra_val, str):
-            extra_bonus = 10 if extra_val.strip().lower() == "yes" else 0
-        else:
-            extra_bonus = 10 if float(extra_val) == 1 else 0
-        data["engagement_score"] = (
-            (data["attendance_percent"] + data["assignments_score"]) / 2
-        ) + extra_bonus
-
-    if (
-        "performance_gap" in data.columns
-        and "previous_marks" in data.columns
-        and "assignments_score" in data.columns
-    ):
-        data["performance_gap"] = data["previous_marks"] - data["assignments_score"]
-
-    return data
 
 
 def encode_categorical_columns(input_df, label_encoders):
@@ -285,8 +252,8 @@ def model_probability(model, X_scaled):
 def main():
     st.title("🎓 Student Academic Performance Prediction")
     st.write(
-        "This app predicts whether a student is likely to **Pass** or **Fail** "
-        "using your trained machine learning models."
+        "Upload a dataset or use the default CSV. "
+        "The form values update automatically from the dataset."
     )
 
     try:
@@ -295,12 +262,11 @@ def main():
         st.error(str(e))
         st.stop()
 
-    dataset_df, dataset_name = load_dataset()
     feature_columns = safe_feature_columns(metadata)
-    dataset_profile = get_dataset_profile(dataset_df, feature_columns)
-
     target_column = metadata.get("target_column", "pass_fail") if isinstance(metadata, dict) else "pass_fail"
     target_encoder = label_encoders.get(target_column) if isinstance(label_encoders, dict) else None
+
+    default_df, default_name = load_default_dataset()
 
     with st.sidebar:
         st.header("Model Settings")
@@ -310,28 +276,55 @@ def main():
             index=0,
         )
 
-        st.markdown("### Files")
-        st.success("Keep all .pkl files in the same folder as app.py")
+        st.markdown("### Upload Dataset")
+        uploaded_file = st.file_uploader(
+            "Upload CSV dataset",
+            type=["csv"],
+            help="When you upload a CSV, the form fields update from that dataset's values."
+        )
 
+    dataset_df = None
+    dataset_name = None
+
+    if uploaded_file is not None:
+        try:
+            dataset_df = pd.read_csv(uploaded_file)
+            dataset_name = uploaded_file.name
+        except Exception as e:
+            st.error(f"Could not read uploaded dataset: {e}")
+            st.stop()
+    else:
+        dataset_df = default_df
+        dataset_name = default_name
+
+    dataset_profile = get_dataset_profile(dataset_df, feature_columns)
+
+    with st.sidebar:
+        st.markdown("### Dataset Status")
         if dataset_df is not None:
             st.success(f"Dataset loaded: {dataset_name}")
             st.write(f"Rows: {dataset_df.shape[0]}")
             st.write(f"Columns: {dataset_df.shape[1]}")
         else:
-            st.warning(
-                "Dataset file not found. Add one of these in the same folder: "
-                "`student_performance_dataset.csv`, `dataset.csv`, `data.csv`, or `students.csv`"
-            )
+            st.warning("No dataset found. Upload a CSV or keep a CSV beside app.py.")
 
-        with st.expander("Show expected input columns"):
+        with st.expander("Expected model input columns"):
             st.write(feature_columns)
+
+    if dataset_df is not None:
+        missing_columns = [col for col in feature_columns if col not in dataset_df.columns]
+        extra_columns = [col for col in dataset_df.columns if col not in feature_columns and col != target_column]
+
+        if missing_columns:
+            st.warning(f"Missing columns in dataset: {missing_columns}")
+        if extra_columns:
+            st.info(f"Extra dataset columns not used by model: {extra_columns}")
 
     user_values = build_input_form(feature_columns, label_encoders, dataset_profile)
 
     if st.button("Predict Result", use_container_width=True):
         try:
             input_df = pd.DataFrame([user_values])
-            input_df = add_engineered_features_if_needed(input_df)
 
             for col in feature_columns:
                 if col not in input_df.columns:
@@ -367,7 +360,9 @@ def main():
         st.dataframe(dataset_df.head(), use_container_width=True)
 
     st.markdown("---")
-    st.caption("Built with Streamlit. Input ranges and dropdowns are pulled from the dataset when available.")
+    st.caption(
+        "Upload a new CSV anytime and the app form will refresh using that dataset's values."
+    )
 
 
 if __name__ == "__main__":
